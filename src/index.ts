@@ -3,15 +3,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import { isAllowedEmail } from "./access-control";
+import { RedashClient } from "./redash";
+import { registerRedashTools } from "./redash-tools";
 import { GoogleHandler } from "./google-handler";
 
-// Context from the auth process, encrypted & stored in the auth token
-// and provided to the MyMCP as this.props
-type Props = {
-	name: string;
-	email: string;
-	accessToken: string;
-};
+import type { Props } from "./utils";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
@@ -20,6 +16,8 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	});
 
 	async init() {
+		registerRedashTools(this.server, new RedashClient(this.env), () => this.props?.email);
+
 		this.server.tool("add", { a: z.number(), b: z.number() }, async ({ a, b }) => {
 			if (!isAllowedEmail(this.props?.email)) {
 				return {

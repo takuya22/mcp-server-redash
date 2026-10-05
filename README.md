@@ -152,3 +152,115 @@ This example has been updated to support the new **Streamable HTTP** transport p
 - `/sse` - **Deprecated**: Legacy SSE protocol (maintained for backward compatibility)
 
 All new integrations should use the `/mcp` endpoint. The SSE endpoint will be removed in a future version.
+
+## Redash MCPツール
+
+`redash_get_query_result` は `GET /api/queries/<query_id>/results.json` で保存済みの結果を取得します。
+SQLを再実行しません。パラメーター付きクエリは対象外です。最新とは「Redashに保存されている最新結果」であり、現在のデータを再検索した結果ではありません。
+仕様: https://redash.io/help/user-guide/integrations-and-api/api/
+
+### ツール一覧
+
+| ツール | 用途 | 主な引数 |
+|---|---|---|
+| `redash_search_queries` | 名前・説明・SQLから検索（ページ指定可能） | `search`, `page=1`, `page_size=25`（最大100） |
+| `redash_get_query` | SQL・説明・パラメーター定義を確認 | `query_id` |
+| `redash_get_query_result` | パラメーターなしのクエリの最新保存済み結果を取得 | `query_id`, `max_rows=100` |
+| `redash_run_query` | 保存済みクエリを実行 | `query_id`, `parameters={}`, `max_age=0`, `max_rows=100` |
+| `redash_get_job` | 実行ジョブの状態を確認 | `job_id` |
+| `redash_get_result` | 結果IDで結果を取得 | `query_result_id`, `max_rows=100` |
+
+検索と複数クエリの利用には、対象の権限を持つUser API Keyを設定します。
+Query API Keyは特定クエリ用で、検索などには使えません。APIレスポンスのクエリ用キーはMCPへ返しません。
+実行できるのは既存の保存済みクエリです。任意SQLの入力やクエリの作成・更新は公開していません。
+保存済みSQLがデータを変更する場合もあるため、実行ツールは読み取り専用として宣言していません。
+
+### 検索から実行・結果取得まで
+
+1. `redash_search_queries` に `{"search":"売上"}` を渡し、クエリIDを選びます。
+2. `redash_get_query` に `{"query_id":123}` を渡し、SQLとパラメーター名を確認します。
+3. `redash_run_query` に次のような引数を渡します（パラメーター名はクエリ定義に合わせます）。
+
+```json
+{
+  "query_id": 123,
+  "parameters": { "start_date": "2026-10-01", "end_date": "2026-10-04" },
+  "max_age": 0,
+  "max_rows": 100
+}
+```
+
+`max_age=0` は新規実行です。`1800` なら30分以内のキャッシュを利用できます。
+`kind="result"` なら結果がその場で返ります。
+`kind="job"` なら返された `id` を `redash_get_job` の `job_id` に渡してください。
+`status_name` が `pending` / `started` なら少し待って再確認し、`success` になったら `query_result_id` を `redash_get_result` に渡します。
+`failure` / `cancelled` は完了した失敗状態です。詳細はRedash側で確認してください。
+長時間の待機や自動ポーリングはMCPサーバー内では行いません。
+
+### コード構成
+
+- `src/index.ts`: OAuthとMCPサーバーの構成、ツールの登録呼び出し
+- `src/redash.ts`: Redash APIクライアント、レスポンス検証、結果の整形、通信制限
+- `src/redash-tools.ts`: MCPツールの入力定義、利用者チェック、エラー応答
+- `src/access-control.ts`: 許可メールアドレスの判定
+- `tests/redash*.test.mjs`: API通信とツール動作・アクセス制御のテスト（実Redashへ接続しません）
+
+### ローカル設定
+
+既存の `.dev.vars` に次を追加します（Google OAuthの設定は残してください）。
+
+```dotenv
+REDASH_BASE_URL=https://redash.example.com
+REDASH_API_KEY=your_redash_api_key
+```
+
+`REDASH_BASE_URL` は `/api` より前のURLです。組織のパスがある場合は `https://redash.example.com/org` のように指定します。
+クエリ画面の「Show API Key」で取得できるQuery API Keyは、そのクエリのみに利用できます。
+複数のクエリを扱う場合はUser API Keyを使えますが、キーの所有者と同じ権限になります。
+APIキーはツールの引数やチャットに渡さず、サーバー側だけに保存します。
+
+```bash
+npm run dev
+```
+
+Inspectorを `http://localhost:8788/mcp` に接続し、`yana22thx@gmail.com` で認証します。
+「List Tools」から `redash_get_query_result` を選択して実行します。
+
+```json
+{
+  "query_id": 123,
+  "max_rows": 100
+}
+```
+
+`query_id` はRedashクエリ画面のURL `/queries/123` の数字です。
+`max_rows` の既定値は100、上限は1000です。列情報、結果ID、取得時刻、行データ、総行数、切り詰めの有無を返します。
+レスポンスが5 MiBを超える場合は拒否します。`max_rows` は返却行数を制限するもので、Redashからのダウンロード量を減らすものではありません。
+Google認証後のトークン発行と、各ツール実行の両方で指定メールアドレスを確認します。
+
+### Cloudflareへの設定と反映
+
+```bash
+npx wrangler secret put REDASH_BASE_URL
+npx wrangler secret put REDASH_API_KEY
+npm run deploy
+```
+
+Cloudflare WorkersからRedashへ通信できる必要があります。社内VPNからのみ到達できるRedashには、追加の接続構成が必要です。
+401はAPIキー、403はクエリの権限、404はクエリIDや保存済み結果の有無を確認してください。
+
+### 検証とGit差分
+
+Node.js 22.6以降でテストできます。
+
+```bash
+npm run type-check
+npm test
+
+git log --oneline
+git diff --stat
+git diff
+```
+
+Redash追加前の状態をベースラインのコミットとして保存し、追加分は未コミットの差分として残しています。
+`.dev.vars`、`.env` とその派生ファイルはGit対象外です。ローカルのみで管理し、リモートへのpushはしていません。

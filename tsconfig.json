@@ -25,6 +25,7 @@
 
 		/* Disable emitting files from a compilation. */
 		"noEmit": true,
+		"allowImportingTsExtensions": true,
 
 		/* Ensure that each file can be safely transpiled without relying on other imports. */
 		"isolatedModules": true,
